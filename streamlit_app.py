@@ -1,150 +1,201 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
 import math
 
-# --- 設定頁面配置 ---
-st.set_page_config(page_title="標準工期算出工具 (Ver 2.5)", layout="wide")
+# --- 頁面設定 ---
+st.set_page_config(
+    page_title="新標準工期算出工具 (台灣客製版)",
+    page_icon="🏗️",
+    layout="wide"
+)
 
-st.title("🏗️ 標準工期算出工具 (仿 Takenaka Ver 2.5)")
+# --- CSS樣式優化 ---
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f5f5f5;
+    }
+    .stMetric {
+        background-color: white;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("🏗️ 新標準工期算出工具 (Ver 2.5 台灣客製版)")
+st.caption("基於 Takenaka 2010 邏輯核心，針對台灣行事曆與工時進行優化")
 st.markdown("---")
 
-# --- 側邊欄：輸入參數 (參照 Source 1) ---
-st.sidebar.header("1. 基本條件設定")
+# ==========================================
+# 側邊欄：參數輸入
+# ==========================================
+with st.sidebar:
+    st.header("1. 專案基本資料")
+    project_name = st.text_input("工事名", "某商業大樓新建工程")
+    
+    # 結構係數 (參考原始 Excel)
+    structure_map = {"RC": 1.0, "SRC": 2.0, "S": 3.0}
+    ug_struct = st.selectbox("地下結構", options=structure_map.keys(), index=1)
+    ag_struct = st.selectbox("地上結構", options=structure_map.keys(), index=2)
+    
+    col1, col2 = st.columns(2)
+    floors_under = col1.number_input("地下階數", value=4.0, step=0.5)
+    floors_above = col2.number_input("地上階數", value=16.0, step=0.5)
+    
+    total_area = st.number_input("總樓地板面積 (㎡)", value=28224.0, step=100.0)
+    has_pile = st.checkbox("包含基樁工程 (杭)", value=True)
 
-project_name = st.sidebar.text_input("工事名", "上海商銀-test")
-location = st.sidebar.text_input("建築地", "台北")
+    st.markdown("---")
+    
+    # ------------------------------------------
+    # 重點修改：動態稼動率計算機
+    # ------------------------------------------
+    st.header("2. 施工效率設定 (台灣模式)")
+    st.info("請根據實際勞務狀況設定，系統將自動計算係數。")
+    
+    # 輸入參數
+    days_off_per_week = st.slider("每週休假天數 (天)", 0.0, 2.0, 2.0, step=0.5, help="1.0=週休一日, 1.5=隔週休二日, 2.0=週休二日")
+    national_holidays = st.number_input("年國定假日/颱風等 (天)", value=12, help="台灣勞基法約12天，可自行增加颱風假預估")
+    daily_hours = st.number_input("每日實際工時 (小時)", value=8.0, step=0.5, help="竹中原版預設為7小時，台灣常為8小時")
+    
+    # --- 核心邏輯：係數計算 ---
+    # 1. 計算年總工時
+    total_days_year = 365
+    annual_work_days = total_days_year - (days_off_per_week * 52) - national_holidays
+    annual_work_hours = annual_work_days * daily_hours
+    
+    # 2. 竹中公式基準常數 (從原始 CSV 反推：2184小時 / 0.85係數)
+    BASE_CONSTANT = 2569.41176
+    
+    # 3. 算出係數
+    work_coef = annual_work_hours / BASE_CONSTANT
+    
+    # 顯示計算結果
+    st.markdown(f"""
+    <div style="background-color:#e6f3ff; padding:10px; border-radius:5px;">
+        <b>📊 自動計算稼動率係數:</b> <code style="font-size:1.2em; color:blue">{work_coef:.4f}</code><br>
+        <small>(年工時: {annual_work_hours:.1f} 小時)</small>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    st.header("3. 特殊條件")
+    special_delay = st.number_input("特殊因素延遲 (個月)", value=0.0)
 
-# 結構與用途係數 (參照 Source 1 右下角表格)
-# 這裡將 CSV 中的係數表轉化為 Python 字典
-structure_options = {"RC": 1.0, "SRC": 2.0, "S": 3.0}
-usage_options = {
-    "事務施設(辦公)": 1.0, "店舗": 2.0, "購物中心": 3.0, "住宅": 4.0, 
-    "飯店": 5.0, "醫院": 6.0, "學校": 7.0, "工廠": 10.0
-}
+# ==========================================
+# 核心計算邏輯 (請在此填入 Excel 公式)
+# ==========================================
 
-underground_struct = st.sidebar.selectbox("地下/基礎構造", list(structure_options.keys()), index=1) # 預設 SRC
-above_struct = st.sidebar.selectbox("地上構造", list(structure_options.keys()), index=2) # 預設 S
-usage = st.sidebar.selectbox("建物用途", list(usage_options.keys()))
-
-# 數值輸入
-col1, col2 = st.sidebar.columns(2)
-floors_under = col1.number_input("地下階數", value=4.0, step=0.5)
-floors_above = col2.number_input("地上階數", value=16.0, step=0.5)
-total_area = st.sidebar.number_input("延床面積 (㎡)", value=28224.0)
-has_pile = st.sidebar.checkbox("杭（基樁）有無", value=True)
-
-# 稼動率係數設定
-st.sidebar.markdown("### 2. 效率設定")
-work_day_options = {
-    "週休一日 (係數 0.85)": 0.85,
-    "週休一日+月休一六 (係數 0.757)": 0.75737,
-    "趕工/無休 (係數 0.96)": 0.9644
-}
-work_coef_key = st.sidebar.selectbox("作業所稼働率", list(work_day_options.keys()), index=1)
-work_coef = work_day_options[work_coef_key]
-
-# 特殊條件
-st.sidebar.markdown("### 3. 特殊條件")
-special_delay = st.sidebar.number_input("特殊條件工期總和 (個月)", value=0.0)
-
-# --- 核心計算邏輯 (這部分需要您校對 Excel 公式) ---
-# 這裡使用模擬邏輯，請您對照 Excel 修改數值運算部分
-
-def calculate_duration(f_under, f_above, area, coef, is_top_down=False):
+def calculate_schedule(f_u, f_a, area, coef, pile, is_top_down):
     """
-    計算工期的函數
-    :param is_top_down: 是否為逆打工法
+    計算工期主函數
     """
+    # -------------------------------------------------------------------------
+    # ⚠️【待辦事項】請打開您的 .xls 檔案，將下列變數的計算方式替換為真實公式
+    # 目前使用 "模擬公式" 讓程式能跑出接近範例的數字
+    # -------------------------------------------------------------------------
     
-    # ---------------------------------------------------------
-    # ⚠️【關鍵】請在此處替換為 Excel 中的真實公式
-    # 目前為依照您 CSV 輸出的數據反推的"模擬公式"
-    # ---------------------------------------------------------
+    # [模擬] 地下室工期基準 (月)
+    # 假設：跟面積開根號成正比，跟樓層數成正比，有樁再加時
+    base_under_months = (math.sqrt(area) * 0.05 + f_u * 1.2) 
+    if pile:
+        base_under_months += 2.5
+        
+    # [模擬] 地上層工期基準 (月)
+    # 假設：每層樓約 0.7 個月
+    base_above_months = f_a * 0.75 + 0.5
     
-    # 1. 杭・地下階工期計算 (假設與面積開根號和樓層有關)
-    # 模擬公式：基礎係數 * (地下樓層 * 2 + 面積係數) / 稼動率
-    base_under = 17.1 if has_pile else 14.0 # 依照 CSV 範例填入的基準
+    # [模擬] 收尾工程 (月)
+    finishing_months = 3.25
     
-    # 2. 地上階工期計算
-    # 模擬公式：樓層 * 單層週期
-    base_above = 12.5 # 依照 CSV 範例填入的基準
-    
-    # 3. 收尾測試
-    finishing = 3.25
-    
-    # 如果是逆打 (Top-Down)，工期縮短
+    # [模擬] 逆打縮短時間 (月)
+    # 假設：逆打可以讓地上層提早開始，縮短約 20% 的總時間
     reduction = 0.0
     if is_top_down:
-        # CSV 顯示逆打縮短了約 5.76 個月
-        reduction = 5.76 
-        
-    total_months = (base_under + base_above + finishing - reduction) + special_delay
+        reduction = (base_under_months * 0.3) # 模擬值
+    
+    # -------------------------------------------------------------------------
+    # 應用稼動率係數 (Coefficient Application)
+    # 邏輯：係數越低(假越多)，工期需要越長。
+    # 標準工期 = 基準工期 / 係數
+    # -------------------------------------------------------------------------
+    
+    real_under = base_under_months / coef
+    real_above = base_above_months / coef
+    real_finish = finishing_months  # 收尾通常較不受重型機具稼動率影響，或可選擇是否除以係數
+    
+    total = (real_under + real_above + real_finish) - reduction + special_delay
     
     return {
-        "underground": base_under,
-        "above": base_above,
-        "finishing": finishing,
+        "underground": real_under,
+        "above": real_above,
+        "finish": real_finish,
         "reduction": reduction,
-        "total": total_months
+        "total": total
     }
 
-# --- 執行計算 ---
+# 執行計算
+res_bu = calculate_schedule(floors_under, floors_above, total_area, work_coef, has_pile, is_top_down=False)
+res_td = calculate_schedule(floors_under, floors_above, total_area, work_coef, has_pile, is_top_down=True)
 
-# 1. 順打 (Bottom-Up)
-res_bu = calculate_duration(floors_under, floors_above, total_area, work_coef, is_top_down=False)
+# ==========================================
+# 主畫面：結果展示
+# ==========================================
 
-# 2. 逆打 (Top-Down)
-res_td = calculate_duration(floors_under, floors_above, total_area, work_coef, is_top_down=True)
+# 1. KPI 指標區
+col1, col2, col3 = st.columns(3)
+col1.metric("順打工法 (Bottom-Up) 總工期", f"{res_bu['total']:.1f} 個月")
+col2.metric("逆打工法 (Top-Down) 總工期", f"{res_td['total']:.1f} 個月", 
+            delta=f"{res_td['total'] - res_bu['total']:.1f} 個月", delta_color="inverse")
+col3.metric("逆打節省時間", f"{res_bu['total'] - res_td['total']:.1f} 個月")
 
-# --- 顯示結果介面 ---
+st.markdown("### 📅 工期詳細比較表")
 
-st.header(f"專案：{project_name} 工期試算結果")
-
-# 建立分頁
-tab1, tab2 = st.tabs(["📊 工期比較總表", "📅 詳細時程數據"])
+# 2. 數據視覺化
+tab1, tab2 = st.tabs(["📊 圖表分析", "📝 詳細數據"])
 
 with tab1:
-    # 顯示關鍵指標
-    c1, c2, c3 = st.columns(3)
-    c1.metric("順打總工期", f"{res_bu['total']:.2f} 個月")
-    c2.metric("逆打總工期", f"{res_td['total']:.2f} 個月", delta=f"-{res_bu['total'] - res_td['total']:.2f} 個月")
-    c3.metric("工期縮短效益", f"{res_td['reduction']:.2f} 個月")
-
-    # 製作圖表數據
+    # 準備繪圖資料
     chart_data = pd.DataFrame({
-        "工項": ["杭/地下", "地上結構", "收尾測試", "特殊條件"],
-        "順打 (月)": [res_bu['underground'], res_bu['above'], res_bu['finishing'], special_delay],
-        "逆打 (月)": [res_td['underground'], res_td['above'], res_td['finishing'], special_delay]
+        "工項": ["杭/地下結構", "地上結構", "裝修/機電/收尾", "特殊因素", "逆打節省"],
+        "順打 (月)": [res_bu['underground'], res_bu['above'], res_bu['finish'], special_delay, 0],
+        "逆打 (月)": [res_td['underground'], res_td['above'], res_td['finish'], special_delay, -res_td['reduction']]
     })
     
-    st.subheader("工種時間分佈比較")
-    st.bar_chart(chart_data.set_index("工項"))
-
+    # 轉置資料以符合 st.bar_chart 堆疊需求
+    st.bar_chart(chart_data.set_index("工項"), color=["#FF9999", "#9999FF"])
+    
     if res_td['total'] < res_bu['total']:
-        st.success(f"💡 建議：採用逆打工法可縮短工期約 {res_bu['total'] - res_td['total']:.1f} 個月")
+        st.success(f"💡 分析結論：在此條件下，採用**逆打工法**預計可比順打提早 **{res_bu['total'] - res_td['total']:.1f} 個月** 完工。")
 
 with tab2:
-    st.subheader("詳細計算數據")
-    st.info("以下數據基於您輸入的參數與預設公式計算")
-    
-    col_a, col_b = st.columns(2)
-    
-    with col_a:
-        st.markdown("### 🏗️ 順打工法 (Bottom-Up)")
-        st.write(f"- 杭・地下階工期: **{res_bu['underground']:.2f}** 個月")
-        st.write(f"- 地上階工期: **{res_bu['above']:.2f}** 個月")
-        st.write(f"- 受電～竣工: **{res_bu['finishing']:.2f}** 個月")
-        st.write(f"- **總計**: **{res_bu['total']:.2f}** 個月")
-        
-    with col_b:
-        st.markdown("### 🏗️ 逆打工法 (Top-Down)")
-        st.write(f"- 杭・地下階工期: **{res_td['underground']:.2f}** 個月")
-        st.write(f"- 地上階工期: **{res_td['above']:.2f}** 個月")
-        st.write(f"- 受電～竣工: **{res_td['finishing']:.2f}** 個月")
-        st.write(f"- 逆打縮短時間: **-{res_td['reduction']:.2f}** 個月")
-        st.write(f"- **總計**: **{res_td['total']:.2f}** 個月")
+    st.write("#### 計算明細 (單位：日曆月)")
+    comparison_df = pd.DataFrame({
+        "項目": ["基礎/地下工程", "地上結構工程", "受電/竣工收尾", "特殊條件", "逆打扣減", "<b>總工期</b>"],
+        "順打工法": [
+            f"{res_bu['underground']:.2f}", 
+            f"{res_bu['above']:.2f}", 
+            f"{res_bu['finish']:.2f}",
+            f"{special_delay:.2f}",
+            "0.00",
+            f"<b>{res_bu['total']:.2f}</b>"
+        ],
+        "逆打工法": [
+            f"{res_td['underground']:.2f}", 
+            f"{res_td['above']:.2f}", 
+            f"{res_td['finish']:.2f}",
+            f"{special_delay:.2f}",
+            f"-{res_td['reduction']:.2f}",
+            f"<b>{res_td['total']:.2f}</b>"
+        ]
+    })
+    # 顯示 HTML 表格以支援粗體
+    st.write(comparison_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
-# --- 頁尾 ---
+# ==========================================
+# 頁尾說明
+# ==========================================
 st.markdown("---")
-st.caption("Calculation based on Takenaka 2010 Ver 2.5 Logic (Ported to Python)")
+st.warning("⚠️ **注意**：本工具工期基準計算公式目前為模擬值。請務必將 Excel 內的真實物理公式填入 `calculate_schedule` 函數中以獲得正確結果。")
